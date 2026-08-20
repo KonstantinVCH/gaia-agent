@@ -1,0 +1,9 @@
+gradio
+requests
+pandas
+openpyxl
+smolagents
+duckduckgo-search
+markdownify
+huggingface_hub
+youtube-transcript-api
