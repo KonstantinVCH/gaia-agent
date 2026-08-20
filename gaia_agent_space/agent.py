@@ -19,21 +19,44 @@ from tools import DownloadGaiaFileTool, TranscribeAudioTool, YoutubeTranscriptTo
 
 # --- Выбор провайдера ---
 # Приоритет:
-#   1. GROQ_API_KEY → Groq (бесплатно, llama-3.3-70b-versatile)
-#   2. HF_TOKEN    → HF Inference API (бесплатные лимиты)
-# Модель можно переопределить MODEL_ID (секрет Space).
+#   1. XAI_API_KEY  → xAI / Grok (OpenAI-совместимый API)
+#   2. GROQ_API_KEY → Groq (llama-3.3-70b-versatile)
+#   3. HF_TOKEN     → HF Inference API
+# Модель можно переопределить секретом MODEL_ID.
 
-DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
-DEFAULT_HF_MODEL   = "Qwen/Qwen2.5-Coder-32B-Instruct"
+DEFAULT_GOOGLE_MODEL = "gemini-3.6-flash"
+DEFAULT_XAI_MODEL    = "grok-3"
+DEFAULT_GROQ_MODEL   = "llama-3.3-70b-versatile"
+DEFAULT_HF_MODEL     = "Qwen/Qwen2.5-Coder-32B-Instruct"
 
 
 def _build_model():
-    model_id = os.getenv("MODEL_ID")
-    groq_key  = os.getenv("GROQ_API_KEY")
-    hf_token  = os.getenv("HF_TOKEN")
+    from smolagents import OpenAIServerModel, InferenceClientModel
+
+    model_id   = os.getenv("MODEL_ID")
+    google_key = os.getenv("GOOGLE_API_KEY")
+    xai_key    = os.getenv("XAI_API_KEY")
+    groq_key   = os.getenv("GROQ_API_KEY")
+
+    if google_key:
+        mid = model_id or DEFAULT_GOOGLE_MODEL
+        print(f"Provider: Google Gemini  |  Model: {mid}")
+        return OpenAIServerModel(
+            model_id=mid,
+            api_base="https://generativelanguage.googleapis.com/v1beta/openai/",
+            api_key=google_key,
+        ), mid
+
+    if xai_key:
+        mid = model_id or DEFAULT_XAI_MODEL
+        print(f"Provider: xAI  |  Model: {mid}")
+        return OpenAIServerModel(
+            model_id=mid,
+            api_base="https://api.x.ai/v1",
+            api_key=xai_key,
+        ), mid
 
     if groq_key:
-        from smolagents import OpenAIServerModel
         mid = model_id or DEFAULT_GROQ_MODEL
         print(f"Provider: Groq  |  Model: {mid}")
         return OpenAIServerModel(
@@ -42,14 +65,12 @@ def _build_model():
             api_key=groq_key,
         ), mid
 
-    from smolagents import InferenceClientModel
     mid = model_id or DEFAULT_HF_MODEL
     print(f"Provider: HF Inference API  |  Model: {mid}")
     return InferenceClientModel(model_id=mid), mid
 
 
-# Для обратной совместимости (test_space_startup.py проверяет наличие константы)
-DEFAULT_MODEL_ID = DEFAULT_GROQ_MODEL
+DEFAULT_MODEL_ID = DEFAULT_GOOGLE_MODEL
 
 # Библиотеки, которые CodeAgent разрешено импортировать в своём коде —
 # нужны, чтобы агент мог сам разобрать вложения вопросов GAIA (таблицы
