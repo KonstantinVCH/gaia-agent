@@ -47,6 +47,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Ничего не делать, только показать план.")
     args = parser.parse_args()
 
+    groq_key = os.getenv("GROQ_API_KEY")
     token = os.getenv("HF_TOKEN")
     if not token:
         print("ОШИБКА: не задана переменная окружения HF_TOKEN.", file=sys.stderr)
@@ -54,6 +55,10 @@ def main() -> int:
         print("  Windows cmd:  set HF_TOKEN=hf_...", file=sys.stderr)
         print("  PowerShell:   $env:HF_TOKEN=\"hf_...\"", file=sys.stderr)
         print("  bash:         export HF_TOKEN=hf_...", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("HF_TOKEN нужен именно для создания Space (права Write).", file=sys.stderr)
+        print("Если исчерпан лимит инференса HF — дополнительно задайте", file=sys.stderr)
+        print("GROQ_API_KEY, и модель будет работать через Groq.", file=sys.stderr)
         return 1
 
     here = Path(__file__).parent
@@ -89,6 +94,11 @@ def main() -> int:
     secrets = []
     if not args.no_secret:
         secrets.append("HF_TOKEN")
+    # GROQ_API_KEY прописывается отдельно и обязательно: HF_TOKEN нужен Space
+    # для входа пользователя, но если месячный лимит HF исчерпан, модель придёт
+    # с Groq — и без этого секрета агент на Space останется без модели вовсе.
+    if groq_key:
+        secrets.append("GROQ_API_KEY")
     if args.model:
         secrets.append(f"MODEL_ID={args.model}")
     if args.vision_model:
@@ -140,7 +150,13 @@ def main() -> int:
     # 3. Прописываем секреты
     print("[3/3] Прописываю секреты...")
     try:
+        if groq_key:
+            api.add_space_secret(repo_id=repo_id, key="GROQ_API_KEY", value=groq_key)
+            print("      GROQ_API_KEY — прописан")
+
         if not args.no_secret:
+            # Тот же токен передаём Space как секрет: агенту он нужен, чтобы
+            # обращаться к Inference API. Значение нигде не печатается.
             api.add_space_secret(repo_id=repo_id, key="HF_TOKEN", value=token)
             print("      HF_TOKEN — прописан")
         if args.model:
@@ -152,6 +168,7 @@ def main() -> int:
         if args.no_secret and not (args.model or args.vision_model):
             print("      пропущено (--no-secret)")
     except Exception as e:
+        # Не выходим с ошибкой: файлы уже загружены, секрет можно дописать руками.
         print(f"      ПРЕДУПРЕЖДЕНИЕ: не удалось прописать секрет ({e}).")
         print(f"      Добавьте вручную: {space_url}/settings")
 

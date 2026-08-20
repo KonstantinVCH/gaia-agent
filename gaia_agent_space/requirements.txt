@@ -2,10 +2,11 @@ gradio[oauth]
 requests
 pandas
 openpyxl
-lxml
 smolagents
 ddgs
 markdownify
 huggingface_hub
 youtube-transcript-api
+pypdf
+lxml
 openai

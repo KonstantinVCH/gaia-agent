@@ -11,8 +11,9 @@ from agent import GaiaAgent
 DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
 
 # ----- Собственный агент -----
-# BasicAgent из официального шаблона заменён на GaiaAgent (smolagents.CodeAgent
-# с инструментами веб-поиска, чтения страниц и скачивания приложенных файлов).
+# BasicAgent из официального шаблона заменён на GaiaAgent — smolagents.CodeAgent
+# с шестью инструментами (веб-поиск, чтение страниц, скачивание приложенных
+# файлов, распознавание аудио, расшифровка YouTube, анализ изображений).
 # Логика самого агента — в agent.py и tools.py.
 
 
@@ -20,6 +21,11 @@ def run_and_submit_all(profile: gr.OAuthProfile | None):
     """
     Fetches all questions, runs GaiaAgent on them, submits all answers,
     and displays the results.
+
+    Это функция-ГЕНЕРАТОР: она делает yield после каждого вопроса, и Gradio
+    показывает промежуточный результат сразу. Иначе прогон 20 вопросов —
+    это много минут полностью пустого окна статуса, где невозможно отличить
+    «агент думает» от «всё зависло».
     """
     # --- Determine HF Space Runtime URL and Repo URL ---
     space_id = os.getenv("SPACE_ID")  # Get the SPACE_ID for sending link to the code
@@ -29,18 +35,21 @@ def run_and_submit_all(profile: gr.OAuthProfile | None):
         print(f"User logged in: {username}")
     else:
         print("User not logged in.")
-        return "Please Login to Hugging Face with the button.", None
+        yield "Please Login to Hugging Face with the button.", None
+        return
 
     api_url = DEFAULT_API_URL
     questions_url = f"{api_url}/questions"
     submit_url = f"{api_url}/submit"
 
     # 1. Instantiate Agent
+    yield "Инициализация агента...", None
     try:
         agent = GaiaAgent(api_url=api_url)
     except Exception as e:
         print(f"Error instantiating agent: {e}")
-        return f"Error initializing agent: {e}", None
+        yield f"Error initializing agent: {e}", None
+        return
 
     # In the case of an app running as a Hugging Face space, this link points
     # toward your codebase (useful for others, so please keep it public)
@@ -49,36 +58,53 @@ def run_and_submit_all(profile: gr.OAuthProfile | None):
 
     # 2. Fetch Questions
     print(f"Fetching questions from: {questions_url}")
+    yield "Получение списка вопросов...", None
     try:
         response = requests.get(questions_url, timeout=15)
         response.raise_for_status()
         questions_data = response.json()
         if not questions_data:
             print("Fetched questions list is empty.")
-            return "Fetched questions list is empty or invalid format.", None
+            yield "Fetched questions list is empty or invalid format.", None
+            return
         print(f"Fetched {len(questions_data)} questions.")
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching questions: {e}")
-        return f"Error fetching questions: {e}", None
     except requests.exceptions.JSONDecodeError as e:
+        # ВАЖНО: JSONDecodeError — подкласс RequestException, поэтому этот
+        # except должен идти РАНЬШЕ общего, иначе он недостижим.
         print(f"Error decoding JSON response from questions endpoint: {e}")
         print(f"Response text: {response.text[:500]}")
-        return f"Error decoding server response for questions: {e}", None
+        yield f"Error decoding server response for questions: {e}", None
+        return
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching questions: {e}")
+        yield f"Error fetching questions: {e}", None
+        return
     except Exception as e:
         print(f"An unexpected error occurred fetching questions: {e}")
-        return f"An unexpected error occurred fetching questions: {e}", None
+        yield f"An unexpected error occurred fetching questions: {e}", None
+        return
 
     # 3. Run your Agent
     results_log = []
     answers_payload = []
     print(f"Running agent on {len(questions_data)} questions...")
-    for item in questions_data:
+    total = len(questions_data)
+    for index, item in enumerate(questions_data, start=1):
         task_id = item.get("task_id")
         question_text = item.get("question")
         file_name = item.get("file_name")  # может быть пустой строкой или отсутствовать
         if not task_id or question_text is None:
             print(f"Skipping item with missing task_id or question: {item}")
             continue
+
+        # Показываем, за какой вопрос агент взялся, ДО его запуска: один вопрос
+        # может думать минуту с лишним, и без этого непонятно, где он застрял.
+        yield (
+            f"Вопрос {index} из {total}...\n"
+            f"{question_text[:150]}{'...' if len(question_text) > 150 else ''}",
+            pd.DataFrame(results_log) if results_log else None,
+        )
+
         try:
             submitted_answer = agent(question_text, task_id=task_id, file_name=file_name)
             answers_payload.append({"task_id": task_id, "submitted_answer": submitted_answer})
@@ -91,9 +117,17 @@ def run_and_submit_all(profile: gr.OAuthProfile | None):
                 {"Task ID": task_id, "Question": question_text, "Submitted Answer": f"AGENT ERROR: {e}"}
             )
 
+        # Отдаём уже полученные ответы в таблицу — их видно по ходу прогона,
+        # а не только в самом конце.
+        yield (
+            f"Готово {index} из {total}. Ответов собрано: {len(answers_payload)}.",
+            pd.DataFrame(results_log),
+        )
+
     if not answers_payload:
         print("Agent did not produce any answers to submit.")
-        return "Agent did not produce any answers to submit.", pd.DataFrame(results_log)
+        yield "Agent did not produce any answers to submit.", pd.DataFrame(results_log)
+        return
 
     # 4. Prepare Submission
     submission_data = {"username": username.strip(), "agent_code": agent_code, "answers": answers_payload}
@@ -115,7 +149,8 @@ def run_and_submit_all(profile: gr.OAuthProfile | None):
         )
         print("Submission successful.")
         results_df = pd.DataFrame(results_log)
-        return final_status, results_df
+        yield final_status, results_df
+        return
     except requests.exceptions.HTTPError as e:
         error_detail = f"Server responded with status {e.response.status_code}."
         try:
@@ -126,22 +161,26 @@ def run_and_submit_all(profile: gr.OAuthProfile | None):
         status_message = f"Submission Failed: {error_detail}"
         print(status_message)
         results_df = pd.DataFrame(results_log)
-        return status_message, results_df
+        yield status_message, results_df
+        return
     except requests.exceptions.Timeout:
         status_message = "Submission Failed: The request timed out."
         print(status_message)
         results_df = pd.DataFrame(results_log)
-        return status_message, results_df
+        yield status_message, results_df
+        return
     except requests.exceptions.RequestException as e:
         status_message = f"Submission Failed: Network error - {e}"
         print(status_message)
         results_df = pd.DataFrame(results_log)
-        return status_message, results_df
+        yield status_message, results_df
+        return
     except Exception as e:
         status_message = f"An unexpected error occurred during submission: {e}"
         print(status_message)
         results_df = pd.DataFrame(results_log)
-        return status_message, results_df
+        yield status_message, results_df
+        return
 
 
 # --- Build Gradio Interface using Blocks ---
@@ -154,9 +193,12 @@ with gr.Blocks() as demo:
         2. Нажмите «Run Evaluation & Submit All Answers», чтобы агент прошёл все вопросы и отправил ответы.
 
         ---
-        Агент — smolagents.CodeAgent с инструментами веб-поиска, чтения веб-страниц и
-        скачивания приложенных к вопросам файлов (см. agent.py и tools.py).
-        Прогон всех вопросов может занять несколько минут.
+        Агент — `smolagents.CodeAgent` с шестью инструментами: веб-поиск, чтение веб-страниц,
+        скачивание приложенных к вопросам файлов, распознавание речи в аудио, расшифровка
+        видео YouTube и анализ изображений (см. `agent.py` и `tools.py`).
+
+        Прогон всех вопросов занимает несколько минут. Прогресс виден в поле статуса,
+        а ответы появляются в таблице по мере готовности — ждать до самого конца не нужно.
         """
     )
 

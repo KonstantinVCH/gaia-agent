@@ -1,115 +1,170 @@
 """
-24 проверки работоспособности окружения перед деплоем Space.
+Тест, который реально поднимает app.py в окружении, похожем на Hugging Face Space.
+
+Зачем отдельный тест. Дважды за разработку код ломался именно так: собирается
+и импортируется локально, но на Space падает при старте — сначала из-за
+переименованного пакета `ddgs`, потом из-за отсутствия `gradio[oauth]`.
+Оба раза остальные тесты были зелёными, потому что подменяли заглушками как раз
+те места, которые ломаются: кнопку входа и создание агента. Тест, который
+ничего не подменяет и просто пробует запустить приложение так, как это делает
+Space, ловит весь этот класс ошибок целиком.
+
+Что проверяется:
+  - app.py импортируется при выставленных переменных окружения Space;
+  - интерфейс собирается, и на нём действительно включён вход через HF;
+  - зависимости для OAuth реально установлены (без них падает gr.LoginButton);
+  - каждый пакет из requirements.txt импортируется.
+
+Сеть и HF_TOKEN не нужны: агент создаётся уже по нажатию кнопки, а не при импорте.
+
+Запуск:  python test_space_startup.py
 """
 
-import sys
 import os
 
-CHECKS_PASSED = 0
-CHECKS_FAILED = []
+# ВАЖНО: окружение Space выставляется до любых импортов gradio.
+# gradio/oauth.py читает OAUTH_CLIENT_ID на уровне модуля, то есть значение
+# фиксируется в момент импорта. Если сначала импортировать gradio (пусть даже
+# косвенно, проверяя зависимости), а окружение поправить потом — приложение
+# упадёт с «OAUTH_CLIENT_ID is not set», хотя переменная выставлена.
+# Этот тест на такую ошибку уже наступил, поэтому порядок здесь существенный.
+SPACE_ENV = {
+    "SYSTEM": "spaces",
+    "SPACE_ID": "test-user/gaia-agent",
+    "SPACE_HOST": "test-user-gaia-agent.hf.space",
+    "OAUTH_CLIENT_ID": "dummy-client-id",
+    "OAUTH_CLIENT_SECRET": "dummy-client-secret",
+    "OAUTH_SCOPES": "openid profile",
+    "OPENID_PROVIDER_URL": "https://huggingface.co",
+}
+os.environ.update(SPACE_ENV)
+
+import importlib
+import re
+import sys
 
 
-def check(name, fn):
-    global CHECKS_PASSED
+def check(label: str, condition: bool, detail: str = "") -> bool:
+    print(f"[{'ok ' if condition else 'FAIL'}] {label}" + (f" — {detail}" if detail and not condition else ""))
+    return condition
+
+
+REQUIREMENTS_TO_MODULE = {
+    "gradio[oauth]": "gradio",
+    "requests": "requests",
+    "pandas": "pandas",
+    "openpyxl": "openpyxl",
+    "smolagents": "smolagents",
+    "ddgs": "ddgs",
+    "markdownify": "markdownify",
+    "huggingface_hub": "huggingface_hub",
+    "youtube-transcript-api": "youtube_transcript_api",
+    "pypdf": "pypdf",
+    "lxml": "lxml",
+    # openai нужен для OpenAIServerModel — через него идёт путь на Groq.
+    "openai": "openai",
+}
+
+
+def main() -> int:
+    results = []
+
+    # --- зависимости OAuth: именно их отсутствие ломало Space ---
+    for module in ("authlib", "itsdangerous"):
+        try:
+            importlib.import_module(module)
+            ok = True
+        except ImportError:
+            ok = False
+        results.append(
+            check(
+                f"установлен {module} (приходит с gradio[oauth])",
+                ok,
+                "поставьте: pip install 'gradio[oauth]'",
+            )
+        )
+
+    # --- каждый пакет из requirements.txt импортируется ---
+    lines = [l.strip() for l in open("requirements.txt", encoding="utf-8") if l.strip()]
+
+    # Явная и понятная проверка именно того, на чём код уже ломался: бареный
+    # `gradio` вместо `gradio[oauth]`. Без неё ошибка всплывала бы невнятным
+    # сообщением «строка неизвестна тесту».
+    results.append(
+        check(
+            "в requirements указан gradio[oauth], а не просто gradio",
+            "gradio[oauth]" in lines and "gradio" not in lines,
+            "gr.LoginButton() требует extra 'oauth' (пакет authlib) — без него Space падает при старте",
+        )
+    )
+
+    for line in lines:
+        module = REQUIREMENTS_TO_MODULE.get(line)
+        if not module:
+            results.append(check(f"строка requirements '{line}' известна тесту", False,
+                                 "добавьте её в REQUIREMENTS_TO_MODULE"))
+            continue
+        try:
+            importlib.import_module(module)
+            ok = True
+            detail = ""
+        except ImportError as e:
+            ok, detail = False, str(e)[:100]
+        results.append(check(f"импортируется {line} -> {module}", ok, detail))
+
+    # --- собственно запуск приложения в окружении Space ---
+    sys.modules.pop("app", None)
+    app_module = None
     try:
-        fn()
-        CHECKS_PASSED += 1
-        print(f"  OK  {name}")
+        app_module = importlib.import_module("app")
+        results.append(check("app.py импортируется в окружении Space", True))
     except Exception as e:
-        CHECKS_FAILED.append((name, str(e)))
-        print(f"  FAIL  {name}: {e}")
+        results.append(check("app.py импортируется в окружении Space", False, f"{type(e).__name__}: {e}"))
+
+    if app_module is not None:
+        demo = getattr(app_module, "demo", None)
+        results.append(check("интерфейс demo создан", demo is not None))
+        if demo is not None:
+            # expects_oauth выставляется самим gradio при наличии LoginButton.
+            # Если бы кнопки не было, отправка ответов шла бы без имени
+            # пользователя, и результат не зачёлся бы.
+            results.append(
+                check(
+                    "на интерфейсе включён вход через Hugging Face",
+                    getattr(demo, "expects_oauth", False),
+                    "gr.LoginButton() отсутствует или не сработал",
+                )
+            )
+        results.append(
+            check(
+                "функция прогона и отправки на месте",
+                callable(getattr(app_module, "run_and_submit_all", None)),
+            )
+        )
+        results.append(
+            check(
+                "адрес сервера оценки не подменён",
+                getattr(app_module, "DEFAULT_API_URL", "") == "https://agents-course-unit4-scoring.hf.space",
+                getattr(app_module, "DEFAULT_API_URL", "<нет>"),
+            )
+        )
+
+    # --- README со шапкой для Space ---
+    readme = open("README.md", encoding="utf-8").read()
+    results.append(check("README начинается с YAML-шапки", readme.startswith("---")))
+    for field in ("sdk: gradio", "app_file: app.py", "hf_oauth: true"):
+        results.append(check(f"в шапке есть {field}", field in readme))
+    version = re.search(r"sdk_version:\s*([\d.]+)", readme)
+    results.append(check("в шапке указана версия sdk", version is not None,
+                         "без sdk_version Space возьмёт версию наугад"))
+
+    print("\n" + "-" * 70)
+    if all(results):
+        print(f"Все {len(results)} проверок прошли.")
+        return 0
+    print(f"ПРОВАЛЕНО: {results.count(False)} из {len(results)}")
+    return 1
 
 
-# -- 1. Python >= 3.9
-check("Python версия >= 3.9", lambda: (
-    None if sys.version_info >= (3, 9)
-    else (_ for _ in ()).throw(RuntimeError(f"Python {sys.version_info.major}.{sys.version_info.minor}"))
-))
-
-# -- 2–10. Импорты зависимостей
-check("import gradio", lambda: __import__("gradio"))
-check("import requests", lambda: __import__("requests"))
-check("import pandas", lambda: __import__("pandas"))
-check("import openpyxl", lambda: __import__("openpyxl"))
-check("import smolagents", lambda: __import__("smolagents"))
-check("import duckduckgo_search", lambda: __import__("duckduckgo_search"))
-check("import markdownify", lambda: __import__("markdownify"))
-check("import huggingface_hub", lambda: __import__("huggingface_hub"))
-check("import youtube_transcript_api", lambda: __import__("youtube_transcript_api"))
-
-# -- 11–14. Наличие файлов Space
-HERE = os.path.dirname(os.path.abspath(__file__))
-
-def _file(name):
-    path = os.path.join(HERE, name)
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"Файл не найден: {path}")
-
-check("agent.py существует", lambda: _file("agent.py"))
-check("app.py существует", lambda: _file("app.py"))
-check("tools.py существует", lambda: _file("tools.py"))
-check("requirements.txt существует", lambda: _file("requirements.txt"))
-
-# -- 15–18. Импорты модулей Space
-sys.path.insert(0, HERE)
-check("from agent import GaiaAgent", lambda: __import__("agent").GaiaAgent)
-check("from tools import DownloadGaiaFileTool", lambda: __import__("tools").DownloadGaiaFileTool)
-check("from tools import TranscribeAudioTool", lambda: __import__("tools").TranscribeAudioTool)
-check("from tools import YoutubeTranscriptTool", lambda: __import__("tools").YoutubeTranscriptTool)
-
-# -- 19–21. Константы agent.py
-def _check_constants():
-    import agent as a
-    assert hasattr(a, "DEFAULT_MODEL_ID") and a.DEFAULT_MODEL_ID, "DEFAULT_MODEL_ID не задан"
-    assert hasattr(a, "EXTRA_IMPORTS") and a.EXTRA_IMPORTS, "EXTRA_IMPORTS пустой"
-    assert hasattr(a, "ANSWER_INSTRUCTIONS") and a.ANSWER_INSTRUCTIONS, "ANSWER_INSTRUCTIONS пустой"
-
-check("DEFAULT_MODEL_ID определён", lambda: __import__("agent").DEFAULT_MODEL_ID)
-check("EXTRA_IMPORTS непустой список", lambda: (
-    None if __import__("agent").EXTRA_IMPORTS
-    else (_ for _ in ()).throw(RuntimeError("Пустой"))
-))
-check("ANSWER_INSTRUCTIONS непустой", lambda: (
-    None if __import__("agent").ANSWER_INSTRUCTIONS
-    else (_ for _ in ()).throw(RuntimeError("Пустой"))
-))
-
-# -- 22. API endpoint доступен
-def _check_api():
-    import requests
-    r = requests.get("https://agents-course-unit4-scoring.hf.space/questions", timeout=10)
-    r.raise_for_status()
-    data = r.json()
-    if not isinstance(data, list) or len(data) == 0:
-        raise RuntimeError("Пустой список вопросов")
-
-check("API /questions доступен и возвращает данные", _check_api)
-
-# -- 23. smolagents инструменты создаются без ошибок
-def _check_tools():
-    from smolagents import DuckDuckGoSearchTool, VisitWebpageTool
-    DuckDuckGoSearchTool()
-    VisitWebpageTool()
-
-check("DuckDuckGoSearchTool и VisitWebpageTool создаются", _check_tools)
-
-# -- 24. Gradio Blocks строится без ошибок
-def _check_gradio():
-    import gradio as gr
-    with gr.Blocks() as demo:
-        gr.Markdown("test")
-        gr.Button("test")
-    demo.close()
-
-check("Gradio Blocks строится без исключений", _check_gradio)
-
-# --- Итог ---
-TOTAL = 24
-print()
-if CHECKS_FAILED:
-    print(f"Провалено {len(CHECKS_FAILED)} из {TOTAL} проверок:")
-    for name, err in CHECKS_FAILED:
-        print(f"  FAIL {name}: {err}")
-    sys.exit(1)
-else:
-    print(f"Все {TOTAL} проверок прошли.")
+if __name__ == "__main__":
+    raise SystemExit(main())
