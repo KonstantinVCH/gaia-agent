@@ -131,7 +131,7 @@ class GaiaAgent:
                 YoutubeTranscriptTool(),
             ],
             model=model,
-            add_base_tools=True,   # добавляет PythonInterpreterTool и др. из коробки
+            add_base_tools=True,
             additional_authorized_imports=EXTRA_IMPORTS,
             planning_interval=3,
             max_steps=12,
@@ -142,21 +142,19 @@ class GaiaAgent:
         prompt = question
         if file_name:
             prompt += (
-                f"\n\n(У этого вопроса есть приложенный файл: {file_name}. "
-                f"Сначала вызови download_gaia_file с task_id='{task_id}', "
-                f"чтобы скачать его локально. Дальше в зависимости от типа файла: "
-                f".mp3/.wav — передай локальный путь в transcribe_audio; "
-                f".xlsx/.csv — прочитай через pandas прямо в своём коде; "
-                f".py — прочитай текст файла и посчитай/выполни то, что в нём написано; "
-                f".png/.jpg — учти, что у этого агента нет зрения (vision), "
-                f"в таком случае честно верни свою лучшую оценку, а не выдумывай факт.)"
+                f"\n\n(This question has an attached file: {file_name}. "
+                f"First call download_gaia_file with task_id='{task_id}' to save it locally. "
+                f"Then depending on file type: "
+                f".mp3/.wav — pass the local path to transcribe_audio; "
+                f".xlsx/.csv — read with pandas in your code; "
+                f".py — read the file text and compute/execute what it contains; "
+                f".png/.jpg — this agent has no vision; return your best estimate without fabricating facts.)"
             )
         if "youtube.com" in question or "youtu.be" in question:
             prompt += (
-                "\n\n(В вопросе есть ссылка на YouTube-видео. Если нужно понять, "
-                "что там ПРОИЗНЕСЕНО, используй get_youtube_transcript. Учти: этот "
-                "инструмент не показывает изображение — если вопрос про то, что "
-                "ВИДНО в кадре, у агента нет средств это проверить.)"
+                "\n\n(This question contains a YouTube link. To understand what was SAID, "
+                "use get_youtube_transcript. Note: this tool does not provide visual analysis — "
+                "if the question is about what is SEEN on screen, this agent cannot answer that.)"
             )
         prompt += ANSWER_INSTRUCTIONS
 

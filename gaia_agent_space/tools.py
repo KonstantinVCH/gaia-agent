@@ -1,17 +1,11 @@
 """
-Вспомогательные инструменты (Tools) для агента, который проходит
-финальное задание Unit 4 (бенчмарк GAIA) курса Hugging Face Agents Course.
+Custom tools for the GAIA benchmark agent (HF Agents Course Unit 4).
 
-Помимо готовых инструментов из smolagents (веб-поиск, чтение веб-страниц),
-здесь определены собственные инструменты:
-  - DownloadGaiaFileTool   — скачивание файла, приложенного к вопросу (GET /files/{task_id})
-  - TranscribeAudioTool    — распознавание речи в аудио через HF Inference API (Whisper)
-  - YoutubeTranscriptTool  — получение текстовой расшифровки ролика YouTube по ссылке
-
-Набор инструментов подобран под реальный вид вопросов из учебного подмножества
-GAIA (Unit 4): среди них есть вопросы с приложенными .mp3/.xlsx/.py файлами
-и вопросы про содержание конкретных роликов на YouTube — без этих инструментов
-агент такие вопросы решить не может в принципе, а не просто отвечает хуже.
+Built-in smolagents tools (web_search, visit_webpage) are used as-is.
+This file adds:
+  - DownloadGaiaFileTool   — download a file attached to a GAIA question
+  - TranscribeAudioTool    — speech-to-text via HF Inference API (Whisper)
+  - YoutubeTranscriptTool  — fetch YouTube subtitles/transcript by URL
 """
 
 import os
@@ -23,27 +17,18 @@ from smolagents import Tool
 
 
 class DownloadGaiaFileTool(Tool):
-    """
-    Скачивает файл, приложенный к вопросу бенчмарка GAIA, по его task_id,
-    и возвращает локальный путь к сохранённому файлу.
-
-    Не у каждого вопроса есть приложение — если файла нет, API вернёт ошибку
-    404, и инструмент сообщит об этом агенту явным текстом, чтобы он не
-    зависал в ожидании несуществующего файла.
-    """
-
     name = "download_gaia_file"
     description = (
-        "Скачивает файл, приложенный к вопросу GAIA, по его task_id "
-        "(картинка, таблица, аудио, текстовый файл и т.п.). "
-        "Возвращает путь к локально сохранённому файлу, чтобы его можно "
-        "было дальше прочитать/обработать другими средствами "
-        "(например, кодом на Python внутри агента)."
+        "Downloads a file attached to a GAIA question by its task_id "
+        "(image, spreadsheet, audio, text file, etc.). "
+        "Returns the local path of the saved file so it can be read or "
+        "processed further (e.g. pandas for .xlsx/.csv, transcribe_audio "
+        "for .mp3, plain open for .txt/.py)."
     )
     inputs = {
         "task_id": {
             "type": "string",
-            "description": "task_id вопроса, к которому приложен файл.",
+            "description": "The task_id of the question whose file should be downloaded.",
         }
     }
     output_type = "string"
@@ -57,13 +42,11 @@ class DownloadGaiaFileTool(Tool):
         try:
             resp = requests.get(url, timeout=30)
             if resp.status_code == 404:
-                return f"У вопроса {task_id} нет приложенного файла (404)."
+                return f"No file attached to task {task_id} (404)."
             resp.raise_for_status()
         except requests.exceptions.RequestException as e:
-            return f"Не удалось скачать файл для {task_id}: {e}"
+            return f"Failed to download file for {task_id}: {e}"
 
-        # Пытаемся определить расширение файла по заголовку Content-Disposition,
-        # если не получилось — сохраняем без расширения.
         content_disposition = resp.headers.get("content-disposition", "")
         filename = None
         if "filename=" in content_disposition:
@@ -79,31 +62,22 @@ class DownloadGaiaFileTool(Tool):
             f.write(resp.content)
 
         return (
-            f"Файл сохранён локально по пути: {local_path} "
-            f"(исходное имя: {filename or 'неизвестно'})."
+            f"File saved locally at: {local_path} "
+            f"(original name: {filename or 'unknown'})."
         )
 
 
 class TranscribeAudioTool(Tool):
-    """
-    Распознаёт речь в аудиофайле (например, .mp3, скачанном через
-    DownloadGaiaFileTool) и возвращает текстовую расшифровку.
-
-    Использует Hugging Face Inference API (модель автоматического
-    распознавания речи) через тот же HF_TOKEN, что и основная модель агента —
-    отдельный токен или локальная установка whisper не нужны.
-    """
-
     name = "transcribe_audio"
     description = (
-        "Распознаёт речь в локальном аудиофайле и возвращает текст. "
-        "Принимает путь к файлу (например, тот, что вернул download_gaia_file). "
-        "Полезно для вопросов вида «прослушай запись и скажи...»."
+        "Transcribes speech in a local audio file and returns the text. "
+        "Accepts a file path (e.g. the path returned by download_gaia_file). "
+        "Useful for questions like 'listen to the recording and tell me...'."
     )
     inputs = {
         "file_path": {
             "type": "string",
-            "description": "Локальный путь к аудиофайлу (.mp3, .wav и т.п.).",
+            "description": "Local path to an audio file (.mp3, .wav, etc.).",
         }
     }
     output_type = "string"
@@ -121,30 +95,21 @@ class TranscribeAudioTool(Tool):
             text = getattr(result, "text", None) or (result.get("text") if isinstance(result, dict) else None)
             return text or str(result)
         except Exception as e:
-            return f"Не удалось распознать аудио {file_path}: {e}"
+            return f"Failed to transcribe {file_path}: {e}"
 
 
 class YoutubeTranscriptTool(Tool):
-    """
-    Возвращает текстовую расшифровку (субтитры/автосубтитры) видео YouTube
-    по его URL или video_id — без скачивания самого видео.
-
-    Ограничение: работает только для того, что произносится/написано в
-    субтитрах. Вопросы, требующие анализа изображения на видео (например,
-    «сколько видов птиц одновременно в кадре»), эта расшифровка не решает —
-    для этого нужен отдельный видео-VLM, которого в этом агенте нет.
-    """
-
     name = "get_youtube_transcript"
     description = (
-        "Возвращает текстовую расшифровку (субтитры) видео YouTube по ссылке. "
-        "Помогает ответить на вопросы о том, что было СКАЗАНО в видео. "
-        "Не подходит для вопросов о том, что видно на экране (визуальный анализ)."
+        "Returns the text transcript (subtitles/auto-captions) of a YouTube "
+        "video given its URL or video ID. Useful for questions about what was "
+        "SAID in a video. Does NOT provide visual analysis — cannot answer "
+        "questions about what is SEEN on screen."
     )
     inputs = {
         "url_or_video_id": {
             "type": "string",
-            "description": "Ссылка на видео YouTube или его video_id.",
+            "description": "YouTube video URL or video ID.",
         }
     }
     output_type = "string"
@@ -156,15 +121,12 @@ class YoutubeTranscriptTool(Tool):
 
     def forward(self, url_or_video_id: str) -> str:
         try:
-            # В youtube-transcript-api>=1.0 API стал объектным: сначала создаём
-            # клиент, затем вызываем fetch() на конкретном video_id (раньше был
-            # статический метод get_transcript — в новых версиях он удалён).
             from youtube_transcript_api import YouTubeTranscriptApi
 
             video_id = self._extract_video_id(url_or_video_id)
             api = YouTubeTranscriptApi()
             fetched = api.fetch(video_id, languages=["en", "ru"])
             text = " ".join(snippet.text for snippet in fetched)
-            return text[:8000]  # ограничиваем размер, чтобы не раздувать контекст модели
+            return text[:8000]
         except Exception as e:
-            return f"Не удалось получить расшифровку для {url_or_video_id}: {e}"
+            return f"Failed to get transcript for {url_or_video_id}: {e}"
