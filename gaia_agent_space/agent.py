@@ -13,15 +13,43 @@ Unit 4 курса Hugging Face Agents Course (тест на подмножест
 
 import os
 
-from smolagents import CodeAgent, InferenceClientModel, DuckDuckGoSearchTool, VisitWebpageTool
+from smolagents import CodeAgent, DuckDuckGoSearchTool, VisitWebpageTool
 
 from tools import DownloadGaiaFileTool, TranscribeAudioTool, YoutubeTranscriptTool
 
-# Модель можно переопределить переменной окружения MODEL_ID в секретах Space,
-# если выбранная модель окажется недоступна на вашем аккаунте/провайдере
-# инференса. Qwen2.5-Coder-32B-Instruct — модель, которую в тех же целях
-# использовали примеры в самом курсе (Unit 2, Unit 3).
-DEFAULT_MODEL_ID = "Qwen/Qwen2.5-Coder-32B-Instruct"
+# --- Выбор провайдера ---
+# Приоритет:
+#   1. GROQ_API_KEY → Groq (бесплатно, llama-3.3-70b-versatile)
+#   2. HF_TOKEN    → HF Inference API (бесплатные лимиты)
+# Модель можно переопределить MODEL_ID (секрет Space).
+
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_HF_MODEL   = "Qwen/Qwen2.5-Coder-32B-Instruct"
+
+
+def _build_model():
+    model_id = os.getenv("MODEL_ID")
+    groq_key  = os.getenv("GROQ_API_KEY")
+    hf_token  = os.getenv("HF_TOKEN")
+
+    if groq_key:
+        from smolagents import OpenAIServerModel
+        mid = model_id or DEFAULT_GROQ_MODEL
+        print(f"Provider: Groq  |  Model: {mid}")
+        return OpenAIServerModel(
+            model_id=mid,
+            api_base="https://api.groq.com/openai/v1",
+            api_key=groq_key,
+        ), mid
+
+    from smolagents import InferenceClientModel
+    mid = model_id or DEFAULT_HF_MODEL
+    print(f"Provider: HF Inference API  |  Model: {mid}")
+    return InferenceClientModel(model_id=mid), mid
+
+
+# Для обратной совместимости (test_space_startup.py проверяет наличие константы)
+DEFAULT_MODEL_ID = DEFAULT_GROQ_MODEL
 
 # Библиотеки, которые CodeAgent разрешено импортировать в своём коде —
 # нужны, чтобы агент мог сам разобрать вложения вопросов GAIA (таблицы
@@ -35,13 +63,35 @@ EXTRA_IMPORTS = [
 
 ANSWER_INSTRUCTIONS = (
     "\n\n---\n"
-    "Формат ответа (важно!): ответь ОДНИМ финальным значением через "
-    "инструмент final_answer, без пояснений, без слов вроде 'Ответ:' или "
-    "'FINAL ANSWER', без кавычек, если их явно не просят. Если просят число — "
-    "верни только число (без единиц измерения и разделителей тысяч, если не "
-    "указано иное). Если просят список — верни элементы через запятую, ровно "
-    "в том формате, который указан в вопросе."
+    "Answer format (important!): provide ONE final value via the final_answer tool, "
+    "no explanations, no prefixes like 'Answer:' or 'FINAL ANSWER:', no quotes unless "
+    "explicitly requested. If a number is requested — return only the number (no units, "
+    "no thousand separators unless specified). If a list is requested — return items "
+    "comma-separated exactly as the question specifies."
 )
+
+
+def normalize_answer(raw: str) -> str:
+    """Strip common agent prefixes/artifacts before submitting to the scoring server."""
+    import re
+    s = raw.strip()
+    # Remove FINAL ANSWER: prefix
+    s = re.sub(r"(?i)^(final answer\s*:\s*|answer\s*:\s*)", "", s).strip()
+    # Remove surrounding markdown bold/italic
+    s = re.sub(r"^\*+|\*+$", "", s).strip()
+    # Remove trailing period only when the value isn't a sentence
+    if s.endswith(".") and " " not in s:
+        s = s[:-1]
+    # Convert Python list repr to comma-separated
+    if s.startswith("[") and s.endswith("]"):
+        try:
+            import ast
+            items = ast.literal_eval(s)
+            if isinstance(items, list):
+                s = ", ".join(str(i).strip().strip("'\"") for i in items)
+        except Exception:
+            pass
+    return s
 
 
 class GaiaAgent:
@@ -49,9 +99,7 @@ class GaiaAgent:
 
     def __init__(self, api_url: str, model_id: str | None = None):
         self.api_url = api_url
-        model_id = model_id or os.getenv("MODEL_ID", DEFAULT_MODEL_ID)
-
-        model = InferenceClientModel(model_id=model_id)
+        model, model_id = _build_model()
 
         self.agent = CodeAgent(
             tools=[
@@ -67,7 +115,7 @@ class GaiaAgent:
             planning_interval=3,
             max_steps=12,
         )
-        print(f"GaiaAgent initialized with model: {model_id}")
+        print(f"GaiaAgent ready.")
 
     def __call__(self, question: str, task_id: str | None = None, file_name: str | None = None) -> str:
         prompt = question
@@ -93,7 +141,7 @@ class GaiaAgent:
 
         try:
             result = self.agent.run(prompt)
-            return str(result).strip()
+            return normalize_answer(str(result))
         except Exception as e:
             print(f"GaiaAgent error on task {task_id}: {e}")
-            return "Не удалось получить ответ (ошибка агента)."
+            return "ERROR"

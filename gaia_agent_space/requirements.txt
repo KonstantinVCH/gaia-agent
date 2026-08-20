@@ -1,9 +1,11 @@
-gradio
+gradio[oauth]
 requests
 pandas
 openpyxl
+lxml
 smolagents
-duckduckgo-search
+ddgs
 markdownify
 huggingface_hub
 youtube-transcript-api
+openai
